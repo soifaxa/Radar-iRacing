@@ -16,6 +16,26 @@ npm install
 npm run dev
 ```
 
+### Mode overlay (fenêtre transparente au-dessus du jeu)
+
+Pour afficher uniquement le radar en tant qu'overlay transparent par-dessus le jeu :
+
+```bash
+# En développement (démarre Vite + Electron)
+npm run electron:dev
+
+# En production (après build)
+npm run build
+npm run electron
+```
+
+L'overlay s'affichera dans une fenêtre transparente :
+- **Toujours au-dessus** des autres applications
+- **Transparent** (fond invisible)
+- **Positionné** en haut à droite de l'écran
+- **Redimensionnable et déplaçable**
+- **Fermeture** : `Ctrl+Shift+Q`
+
 ### Build de production
 
 ```bash
@@ -65,7 +85,33 @@ const cleanup = connectWebSocket();
 return cleanup;
 ```
 
+### Configuration du serveur Python
+
 Par défaut, le serveur WebSocket est attendu sur `ws://localhost:8765`.
+
+Vous pouvez configurer l'hôte et le port du serveur Python via des variables d'environnement :
+
+1. Créez un fichier `.env` à la racine du projet :
+```bash
+# Hôte du serveur Python (par défaut: localhost)
+VITE_PYTHON_SERVER_HOST=localhost
+
+# Port du serveur Python (par défaut: 8765)
+VITE_PYTHON_SERVER_PORT=8765
+```
+
+2. Pour utiliser un serveur distant, modifiez `VITE_PYTHON_SERVER_HOST` :
+```bash
+# Exemple: serveur sur une autre machine
+VITE_PYTHON_SERVER_HOST=192.168.1.100
+
+# Ou avec un nom d'hôte
+VITE_PYTHON_SERVER_HOST=iracing-server.local
+```
+
+3. Redémarrez le serveur de développement pour appliquer les changements.
+
+La configuration est définie dans `src/config/server.ts` et peut être modifiée directement si nécessaire.
 
 ## 🎨 Personnalisation
 
@@ -79,7 +125,7 @@ Les couleurs et paramètres peuvent être modifiés dans :
 - [ ] Intégration complète avec SDK iRacing
 - [ ] Détection de contacts imminents
 - [ ] Animation de pulsation pour les voitures proches
-- [ ] Mode overlay (toujours au-dessus)
+- [x] Mode overlay (toujours au-dessus)
 - [ ] Thèmes supplémentaires (iRacing, ACC)
 
 ## 📄 Licence

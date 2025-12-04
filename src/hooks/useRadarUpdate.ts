@@ -1,6 +1,8 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { Player, Car } from '../types/radar';
-import { filterCarsInRange } from '../utils/math';
+import { filterCarsInRange, unwrapAngle } from '../utils/math';
+import { SERVER_CONFIG } from '../config/server';
+import { logInfo, logWarn, logError, setWebSocketForLogs } from '../utils/logger';
 
 interface UseRadarUpdateOptions {
   updateRate?: number; // Hz (défaut: 20)
@@ -23,33 +25,95 @@ export function useRadarUpdate({
   });
   const [cars, setCars] = useState<Car[]>([]);
   const [isConnected, setIsConnected] = useState(false);
+  // Suivi du yaw précédent pour éviter les discontinuités à la ligne médiane
+  const previousYawRef = useRef<number | null>(null);
+  // Suivi des positions précédentes des voitures pour détecter les sauts discontinus
+  const previousCarPositionsRef = useRef<Map<number, Position>>(new Map());
+  // Suivi des angles relatifs précédents pour éviter les discontinuités
+  const previousRelativeAnglesRef = useRef<Map<number, number>>(new Map());
+  const previousPlayerPositionRef = useRef<Position | null>(null);
 
   const updateRadar = useCallback(
     (newPlayer: Player, newCars: Car[]) => {
-      console.log(`🔍 Filtrage: ${newCars.length} voitures reçues, rayon = ${radius}m`);
+      // "Unwrapp" le yaw pour éviter les discontinuités à la ligne médiane
+      let unwrappedYaw = newPlayer.yaw;
+      if (previousYawRef.current !== null) {
+        unwrappedYaw = unwrapAngle(newPlayer.yaw, previousYawRef.current);
+      }
+      previousYawRef.current = unwrappedYaw;
       
-      // Log détaillé des distances avant filtrage
-      if (newCars.length > 0) {
-        newCars.forEach((car, index) => {
-          const dx = car.position.x - newPlayer.position.x;
-          const dy = car.position.y - newPlayer.position.y;
-          const dz = car.position.z - newPlayer.position.z;
+      // Détecter et corriger les sauts discontinus dans les positions
+      // Si la position du joueur a un saut discontinu, ajuster les positions des voitures
+      let adjustedPlayerPosition = newPlayer.position;
+      if (previousPlayerPositionRef.current !== null) {
+        const prevPos = previousPlayerPositionRef.current;
+        const dx = newPlayer.position.x - prevPos.x;
+        const dy = newPlayer.position.y - prevPos.y;
+        const dz = newPlayer.position.z - prevPos.z;
+        const distance = Math.sqrt(dx * dx + dy * dy + dz * dz);
+        
+        // Si le saut est très grand (> 100m), c'est probablement une discontinuité à la ligne médiane
+        // Dans ce cas, on garde la position telle quelle (iRacing gère peut-être déjà le saut)
+        // Mais on va ajuster les positions des voitures relativement
+      }
+      previousPlayerPositionRef.current = adjustedPlayerPosition;
+      
+      // Ajuster les positions des voitures pour éviter les sauts discontinus
+      const adjustedCars = newCars.map((car, index) => {
+        const carKey = index; // Utiliser l'index comme clé (on pourrait utiliser un ID si disponible)
+        const previousPos = previousCarPositionsRef.current.get(carKey);
+        
+        if (previousPos) {
+          const dx = car.position.x - previousPos.x;
+          const dy = car.position.y - previousPos.y;
+          const dz = car.position.z - previousPos.z;
           const distance = Math.sqrt(dx * dx + dy * dy + dz * dz);
-          console.log(`  Voiture ${index + 1}: distance=${distance.toFixed(2)}m, pos=(${car.position.x.toFixed(2)}, ${car.position.y.toFixed(2)}, ${car.position.z.toFixed(2)})`);
+          
+          // Si le saut est très grand (> 100m), c'est probablement une discontinuité
+          // On garde la position telle quelle pour l'instant
+          // (Le problème pourrait être dans la transformation, pas dans les positions)
+        }
+        
+        // Mettre à jour la position précédente
+        previousCarPositionsRef.current.set(carKey, car.position);
+        
+        return car;
+      });
+      
+      // Créer un joueur avec le yaw "unwrapped"
+      const playerWithUnwrappedYaw: Player = {
+        position: adjustedPlayerPosition,
+        yaw: unwrappedYaw,
+      };
+      
+      const filteredCars = filterCarsInRange(adjustedCars, playerWithUnwrappedYaw, radius);
+      
+      // Log uniquement des voitures affichées dans le radar (filtrées)
+      const logMessage = `🔍 Filtrage: ${newCars.length} voitures reçues, ${filteredCars.length} voiture(s) dans le rayon (${radius}m)`;
+      console.log(logMessage);
+      logInfo(logMessage);
+      
+      if (filteredCars.length > 0) {
+        filteredCars.forEach((car, index) => {
+          const dx = car.position.x - adjustedPlayerPosition.x;
+          const dy = car.position.y - adjustedPlayerPosition.y;
+          const dz = car.position.z - adjustedPlayerPosition.z;
+          const distance = Math.sqrt(dx * dx + dy * dy + dz * dz);
+          const carLog = `  Voiture ${index + 1}: distance=${distance.toFixed(2)}m, pos=(${car.position.x.toFixed(2)}, ${car.position.y.toFixed(2)}, ${car.position.z.toFixed(2)})`;
+          console.log(carLog);
+          logInfo(carLog);
         });
       }
       
-      const filteredCars = filterCarsInRange(newCars, newPlayer, radius);
-      
-      console.log(`✅ Résultat: ${filteredCars.length} voiture(s) dans le rayon (${radius}m)`);
-      
       if (filteredCars.length === 0 && newCars.length > 0) {
-        console.warn(`⚠️ Toutes les voitures sont en dehors du rayon de ${radius}m. Essayez d'augmenter le rayon.`);
+        const warnMessage = `⚠️ Toutes les voitures sont en dehors du rayon de ${radius}m. Essayez d'augmenter le rayon.`;
+        console.warn(warnMessage);
+        logWarn(warnMessage);
       }
       
-      setPlayer(newPlayer);
+      setPlayer(playerWithUnwrappedYaw);
       setCars(filteredCars);
-      onUpdate?.(newPlayer, filteredCars);
+      onUpdate?.(playerWithUnwrappedYaw, filteredCars);
     },
     [radius, onUpdate]
   );
@@ -86,12 +150,15 @@ export function useRadarUpdate({
       if (!isMounted) return;
 
       try {
-        ws = new WebSocket('ws://localhost:8765');
+        ws = new WebSocket(SERVER_CONFIG.websocketUrl);
 
         ws.onopen = () => {
           if (isMounted) {
             setIsConnected(true);
-            console.log('✅ WebSocket connecté au serveur iRacing');
+            setWebSocketForLogs(ws); // Configurer le WebSocket pour les logs
+            const msg = '✅ WebSocket connecté au serveur iRacing';
+            console.log(msg);
+            logInfo(msg);
           }
         };
 
@@ -100,38 +167,24 @@ export function useRadarUpdate({
           try {
             const data = JSON.parse(event.data);
             if (data.player && data.cars) {
-              // Log de débogage détaillé
-              console.log(`📡 Données reçues: ${data.cars.length} voiture(s) du serveur`);
-              console.log('Joueur:', {
-                x: data.player.position.x,
-                y: data.player.position.y,
-                z: data.player.position.z,
-                yaw: data.player.yaw
-              });
-              
-              if (data.cars.length > 0) {
-                console.log('Première voiture:', {
-                  x: data.cars[0].position.x,
-                  y: data.cars[0].position.y,
-                  z: data.cars[0].position.z,
-                  class: data.cars[0].class
-                });
-              } else {
-                console.warn('⚠️ Aucune voiture reçue du serveur');
-              }
-              
               updateRadar(data.player, data.cars);
             } else {
-              console.warn('⚠️ Données incomplètes reçues:', data);
+              const msg = `⚠️ Données incomplètes reçues: ${JSON.stringify(data)}`;
+              console.warn(msg);
+              logWarn(msg);
             }
           } catch (error) {
-            console.error('Erreur parsing WebSocket:', error);
+            const msg = `Erreur parsing WebSocket: ${error}`;
+            console.error(msg);
+            logError(msg);
           }
         };
 
         ws.onerror = (error) => {
           if (isMounted) {
-            console.warn('⚠️ Erreur WebSocket (serveur peut-être non démarré)');
+            const msg = '⚠️ Erreur WebSocket (serveur peut-être non démarré)';
+            console.warn(msg);
+            logWarn(msg);
             setIsConnected(false);
           }
         };
@@ -139,7 +192,9 @@ export function useRadarUpdate({
         ws.onclose = () => {
           if (isMounted) {
             setIsConnected(false);
-            console.log('WebSocket déconnecté - tentative de reconnexion dans 3 secondes...');
+            const msg = 'WebSocket déconnecté - tentative de reconnexion dans 3 secondes...';
+            console.log(msg);
+            logWarn(msg);
             
             // Reconnexion automatique après 3 secondes
             reconnectTimeout = setTimeout(() => {
@@ -150,7 +205,9 @@ export function useRadarUpdate({
           }
         };
       } catch (error) {
-        console.warn('WebSocket non disponible:', error);
+        const msg = `WebSocket non disponible: ${error}`;
+        console.warn(msg);
+        logWarn(msg);
         if (isMounted) {
           setIsConnected(false);
           // Tentative de reconnexion

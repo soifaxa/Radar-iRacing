@@ -41,6 +41,9 @@ export function Radar({
   rotationEnabled = true,
 }: RadarProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  // Suivi des angles relatifs précédents pour éviter les discontinuités
+  const previousRelativeAnglesRef = useRef<Map<number, number>>(new Map());
+  const previousCarPositionsRef = useRef<Map<number, { x: number; y: number; distance: number; angle: number }>>(new Map());
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -95,13 +98,62 @@ export function Radar({
     ctx.stroke();
 
     // Transformation des voitures et rendu
-    cars.forEach((car) => {
-      const { x, y, distance } = transformToRadarCoordinates(car, player);
+    cars.forEach((car, index) => {
+      // Calculer la distance et l'angle relatif actuels
+      const dx = car.position.x - player.position.x;
+      const dy = car.position.y - player.position.y;
+      const currentDistance = Math.sqrt(dx * dx + dy * dy);
+      const currentAngle = Math.atan2(dy, dx);
+      
+      // Obtenir l'angle relatif précédent pour cette voiture (par index)
+      let previousRelativeAngle = previousRelativeAnglesRef.current.get(index);
+      
+      // Détecter les discontinuités dans les positions
+      const previousData = previousCarPositionsRef.current.get(index);
+      if (previousData) {
+        const { x: prevX, y: prevY, distance: prevDistance, angle: prevAngle } = previousData;
+        const dx = car.position.x - prevX;
+        const dy = car.position.y - prevY;
+        const positionJump = Math.sqrt(dx * dx + dy * dy);
+        
+        // Calculer le changement d'angle
+        let angleChange = currentAngle - prevAngle;
+        // Normaliser l'angle dans [-π, π]
+        while (angleChange > Math.PI) angleChange -= 2 * Math.PI;
+        while (angleChange < -Math.PI) angleChange += 2 * Math.PI;
+        
+        // Si le saut de position est très grand (> 15m) OU si l'angle change de manière discontinue (> π/2),
+        // c'est probablement une discontinuité à la ligne médiane
+        // Dans ce cas, ne pas utiliser l'angle précédent pour éviter de propager l'erreur
+        if (positionJump > 15.0 || Math.abs(angleChange) > Math.PI / 2) {
+          previousRelativeAngle = undefined; // Réinitialiser l'angle pour cette voiture
+        }
+      }
+      
+      // Calculer la transformation avec "unwrapping" de l'angle relatif
+      const { x, y, distance, relativeAngle } = transformToRadarCoordinates(
+        car, 
+        player, 
+        player.yaw, // Passer le yaw unwrapped du joueur
+        previousRelativeAngle
+      );
+      
+      // Stocker l'angle relatif et les données pour la prochaine frame
+      previousRelativeAnglesRef.current.set(index, relativeAngle);
+      previousCarPositionsRef.current.set(index, { 
+        x: car.position.x, 
+        y: car.position.y, 
+        distance: currentDistance,
+        angle: currentAngle
+      });
 
       // Conversion en pixels
       const pixel = worldToPixel(x, y, radius, pixelRadius);
+      // Les coordonnées sont correctement orientées
+      // Le canvas a Y vers le bas, donc on inverse Y pour que les voitures derrière (y < 0) apparaissent en bas
+      // Si y < 0 (voiture derrière), après inversion screenY = centerY - pixel.y > centerY (en bas)
       const screenX = centerX + pixel.x;
-      const screenY = centerY - pixel.y; // Inversion Y pour l'affichage
+      const screenY = centerY - pixel.y;
 
       // Vérifier si la voiture est dans le cercle visible
       const distFromCenter = Math.sqrt(pixel.x * pixel.x + pixel.y * pixel.y);

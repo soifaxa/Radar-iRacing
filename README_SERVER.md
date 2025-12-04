@@ -94,3 +94,4 @@ Si le port 8765 est déjà utilisé, modifiez `WEBSOCKET_PORT` dans `server.py`.
 - Le serveur gère automatiquement les déconnexions/reconnexions
 
 
+
